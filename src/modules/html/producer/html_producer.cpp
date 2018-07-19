@@ -71,6 +71,7 @@ class html_client
     , public CefRenderHandler
     , public CefLifeSpanHandler
     , public CefLoadHandler
+    , public CefDisplayHandler
 {
     std::wstring                        url_;
     spl::shared_ptr<diagnostics::graph> graph_;
@@ -82,7 +83,6 @@ class html_client
     core::video_format_desc              format_desc_;
     tbb::concurrent_queue<std::wstring>  javascript_before_load_;
     std::atomic<bool>                    loaded_;
-    std::atomic<bool>                    removed_;
     std::queue<core::draw_frame>         frames_;
     mutable std::mutex                   frames_mutex_;
 
@@ -111,9 +111,17 @@ class html_client
         graph_->set_text(print());
         diagnostics::register_graph(graph_);
 
-        loaded_  = false;
-        removed_ = false;
+        loaded_ = false;
         executor_.begin_invoke([&] { update(); });
+    }
+
+    void close()
+    {
+        html::invoke([=] {
+            if (browser_ != nullptr) {
+                browser_->GetHost()->CloseBrowser(true);
+            }
+        });
     }
 
     core::draw_frame receive()
@@ -162,23 +170,6 @@ class html_client
             return browser_->GetHost();
         return nullptr;
     }
-
-    void close()
-    {
-        html::invoke([=] {
-            if (browser_ != nullptr) {
-                browser_->GetHost()->CloseBrowser(true);
-            }
-        });
-    }
-
-    void remove()
-    {
-        close();
-        removed_ = true;
-    }
-
-    bool is_removed() const { return removed_; }
 
   private:
     bool GetViewRect(CefRefPtr<CefBrowser> browser, CefRect& rect)
@@ -232,7 +223,6 @@ class html_client
     {
         CASPAR_ASSERT(CefCurrentlyOn(TID_UI));
 
-        removed_ = true;
         browser_ = nullptr;
     }
 
@@ -243,11 +233,22 @@ class html_client
         return false;
     }
 
+    bool OnConsoleMessage(CefRefPtr<CefBrowser> browser,
+                          const CefString&      message,
+                          const CefString&      source,
+                          int                   line) override
+    {
+        CASPAR_LOG(info) << print() << L" Log: " << message.ToWString();
+        return true;
+    }
+
     CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
 
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
 
     CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+
+    CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
 
     void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) override
     {
@@ -262,7 +263,7 @@ class html_client
         auto name = message->GetName().ToString();
 
         if (name == REMOVE_MESSAGE_NAME) {
-            remove();
+            // TODO
 
             return true;
         } else if (name == LOG_MESSAGE_NAME) {
@@ -350,7 +351,7 @@ class html_client
     IMPLEMENT_REFCOUNTING(html_client);
 };
 
-class html_producer : public core::frame_producer_base
+class html_producer : public core::frame_producer
 {
     core::video_format_desc             format_desc_;
     core::monitor::state                state_;
@@ -399,11 +400,6 @@ class html_producer : public core::frame_producer_base
     core::draw_frame receive_impl(int nb_samples) override
     {
         if (client_) {
-            if (client_->is_removed()) {
-                client_ = nullptr;
-                return core::draw_frame{};
-            }
-
             return client_->receive();
         }
 
@@ -434,8 +430,8 @@ spl::shared_ptr<core::frame_producer> create_cg_producer(const core::frame_produ
     const auto param_url      = html_prefix ? params.at(1) : params.at(0);
     const auto filename       = env::template_folder() + param_url + L".html";
     const auto found_filename = find_case_insensitive(filename);
-    const auto http_prefix    = boost::algorithm::istarts_with(param_url, L"http:") ||
-                             boost::algorithm::istarts_with(param_url, L"https:");
+    const auto http_prefix =
+        boost::algorithm::istarts_with(param_url, L"http:") || boost::algorithm::istarts_with(param_url, L"https:");
 
     if (!found_filename && !http_prefix && !html_prefix)
         return core::frame_producer::empty();
