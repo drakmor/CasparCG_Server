@@ -6,7 +6,6 @@ SET (CONFIG_VERSION_MAJOR 2)
 SET (CONFIG_VERSION_MINOR 3)
 SET (CONFIG_VERSION_BUG 0)
 SET (CONFIG_VERSION_TAG "Dev")
-
 option(ENABLE_HTML "Enable HTML module, require CEF" ON)
 
 # Add custom cmake modules path
