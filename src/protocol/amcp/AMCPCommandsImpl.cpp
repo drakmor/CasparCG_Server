@@ -48,6 +48,7 @@
 #include <core/producer/frame_producer.h>
 #include <core/producer/layer.h>
 #include <core/producer/stage.h>
+#include <core/producer/transition/sting_producer.h>
 #include <core/producer/transition/transition_producer.h>
 #include <core/video_format.h>
 
@@ -59,6 +60,7 @@
 #include <memory>
 
 #include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/regex.hpp>
 #include <boost/archive/iterators/base64_from_binary.hpp>
 #include <boost/archive/iterators/insert_linebreaks.hpp>
 #include <boost/archive/iterators/transform_width.hpp>
@@ -220,45 +222,6 @@ core::frame_producer_dependencies get_producer_dependencies(const std::shared_pt
 
 std::wstring loadbg_command(command_context& ctx)
 {
-    transition_info transitionInfo;
-
-    // TRANSITION
-
-    std::wstring message;
-    for (size_t n = 0; n < ctx.parameters.size(); ++n)
-        message += boost::to_upper_copy(ctx.parameters[n]) + L" ";
-
-    static const boost::wregex expr(
-        LR"(.*(?<TRANSITION>CUT|PUSH|SLIDE|WIPE|MIX)\s*(?<DURATION>\d+)\s*(?<TWEEN>(LINEAR)|(EASE[^\s]*))?\s*(?<DIRECTION>FROMLEFT|FROMRIGHT|LEFT|RIGHT)?.*)");
-    boost::wsmatch what;
-    if (boost::regex_match(message, what, expr)) {
-        auto transition         = what["TRANSITION"].str();
-        transitionInfo.duration = boost::lexical_cast<size_t>(what["DURATION"].str());
-        auto direction          = what["DIRECTION"].matched ? what["DIRECTION"].str() : L"";
-        auto tween              = what["TWEEN"].matched ? what["TWEEN"].str() : L"";
-        transitionInfo.tweener  = tween;
-
-        if (transition == L"CUT")
-            transitionInfo.type = transition_type::cut;
-        else if (transition == L"MIX")
-            transitionInfo.type = transition_type::mix;
-        else if (transition == L"PUSH")
-            transitionInfo.type = transition_type::push;
-        else if (transition == L"SLIDE")
-            transitionInfo.type = transition_type::slide;
-        else if (transition == L"WIPE")
-            transitionInfo.type = transition_type::wipe;
-
-        if (direction == L"FROMLEFT")
-            transitionInfo.direction = transition_direction::from_left;
-        else if (direction == L"FROMRIGHT")
-            transitionInfo.direction = transition_direction::from_right;
-        else if (direction == L"LEFT")
-            transitionInfo.direction = transition_direction::from_right;
-        else if (direction == L"RIGHT")
-            transitionInfo.direction = transition_direction::from_left;
-    }
-
     // Perform loading of the clip
     core::diagnostics::scoped_call_context save;
     core::diagnostics::call_context::for_thread().video_channel = ctx.channel_index + 1;
@@ -272,11 +235,23 @@ std::wstring loadbg_command(command_context& ctx)
 
     bool auto_play = contains_param(L"AUTO", ctx.parameters);
 
-    auto pFP2 = create_transition_producer(pFP, transitionInfo);
-    if (auto_play)
-        channel->stage().load(ctx.layer_index(), pFP2, false, transitionInfo.duration); // TODO: LOOP
-    else
-        channel->stage().load(ctx.layer_index(), pFP2, false); // TODO: LOOP
+    spl::shared_ptr<frame_producer> transition_producer = frame_producer::empty();
+    transition_info                 transitionInfo;
+    sting_info                      stingInfo;
+
+    if (try_match_sting(ctx.parameters, stingInfo)) {
+        transition_producer = create_sting_producer(get_producer_dependencies(channel, ctx), pFP, stingInfo);
+    } else {
+        std::wstring message;
+        for (size_t n = 0; n < ctx.parameters.size(); ++n)
+            message += boost::to_upper_copy(ctx.parameters[n]) + L" ";
+
+        // Always fallback to transition
+        try_match_transition(message, transitionInfo);
+        transition_producer = create_transition_producer(pFP, transitionInfo);
+    }
+
+    channel->stage().load(ctx.layer_index(), transition_producer, false, auto_play); // TODO: LOOP
 
     return L"202 LOADBG OK\r\n";
 }
@@ -397,10 +372,16 @@ std::wstring remove_command(command_context& ctx)
     if (index == std::numeric_limits<int>::min()) {
         replace_placeholders(L"<CLIENT_IP_ADDRESS>", ctx.client->address(), ctx.parameters);
 
+        if (ctx.parameters.size() == 0) {
+            return L"402 REMOVE FAILED\r\n";
+        }
+
         index = ctx.consumer_registry->create_consumer(ctx.parameters, get_channels(ctx))->index();
     }
 
-    ctx.channel.channel->output().remove(index);
+    if (!ctx.channel.channel->output().remove(index)) {
+        return L"404 REMOVE FAILED\r\n";
+    }
 
     return L"202 REMOVE OK\r\n";
 }
@@ -762,6 +743,25 @@ std::wstring mixer_keyer_command(command_context& ctx)
     transforms.add(stage::transform_tuple_t(ctx.layer_index(),
                                             [=](frame_transform transform) -> frame_transform {
                                                 transform.image_transform.is_key = value;
+                                                return transform;
+                                            },
+                                            0,
+                                            tweener(L"linear")));
+    transforms.apply();
+
+    return L"202 MIXER OK\r\n";
+}
+
+std::wstring mixer_invert_command(command_context& ctx)
+{
+    if (ctx.parameters.empty())
+        return reply_value(ctx, [](const frame_transform& t) { return t.image_transform.invert ? 1 : 0; });
+
+    transforms_applier transforms(ctx);
+    bool               value = boost::lexical_cast<int>(ctx.parameters.at(0));
+    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
+                                            [=](frame_transform transform) -> frame_transform {
+                                                transform.image_transform.invert = value;
                                                 return transform;
                                             },
                                             0,
@@ -1341,10 +1341,11 @@ std::wstring info_channel_command(command_context& ctx)
     pt::wptree channel_info;
 
     auto state = ctx.channel.channel->state();
-
-    auto bundle = state.get();
-    for (const auto& p : bundle) {
-        const auto    path = boost::algorithm::replace_all_copy(p.first, "/", ".");
+    for (const auto& p : state) {
+        const auto replaced = boost::algorithm::replace_all_copy(p.first, "/", ".");
+        // avoid digit-only nodes in XML
+        const auto path = boost::algorithm::replace_all_regex_copy(
+            replaced, boost::regex("\\.(.*?)\\.([0-9]*?)\\."), std::string(".$1.$1_$2."));
         param_visitor param_visitor(path, channel_info);
         for (const auto& element : p.second) {
             boost::apply_visitor(param_visitor, element);
@@ -1469,6 +1470,7 @@ void register_commands(amcp_command_repository& repo)
     repo.register_channel_command(L"Template Commands", L"CG INVOKE", cg_invoke_command, 2);
 
     repo.register_channel_command(L"Mixer Commands", L"MIXER KEYER", mixer_keyer_command, 0);
+    repo.register_channel_command(L"Mixer Commands", L"MIXER INVERT", mixer_invert_command, 0);
     repo.register_channel_command(L"Mixer Commands", L"MIXER CHROMA", mixer_chroma_command, 0);
     repo.register_channel_command(L"Mixer Commands", L"MIXER BLEND", mixer_blend_command, 0);
     repo.register_channel_command(L"Mixer Commands", L"MIXER OPACITY", mixer_opacity_command, 0);

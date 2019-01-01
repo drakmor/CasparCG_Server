@@ -105,6 +105,8 @@ struct image_producer : public core::frame_producer
 
     core::draw_frame last_frame() override { return frame_; }
 
+    core::draw_frame first_frame() override { return frame_; }
+
     core::draw_frame receive_impl(int nb_samples) override
     {
         state_["file/path"] = description_;
@@ -117,7 +119,7 @@ struct image_producer : public core::frame_producer
 
     std::wstring name() const override { return L"image"; }
 
-    const core::monitor::state& state() const { return state_; }
+    core::monitor::state state() const override { return state_; }
 };
 
 class ieq

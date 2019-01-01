@@ -72,16 +72,18 @@ struct output::impl
 
     void add(const spl::shared_ptr<frame_consumer>& consumer) { add(consumer->index(), consumer); }
 
-    void remove(int index)
+    bool remove(int index)
     {
         std::lock_guard<std::mutex> lock(consumers_mutex_);
         auto                        it = consumers_.find(index);
         if (it != consumers_.end()) {
             consumers_.erase(it);
+            return true;
         }
+        return false;
     }
 
-    void remove(const spl::shared_ptr<frame_consumer>& consumer) { remove(consumer->index()); }
+    bool remove(const spl::shared_ptr<frame_consumer>& consumer) { return remove(consumer->index()); }
 
     void operator()(const_frame input_frame, const core::video_format_desc& format_desc)
     {
@@ -141,10 +143,11 @@ struct output::impl
             }
         }
 
-        state_.clear();
+        monitor::state state;
         for (auto& p : consumers_) {
-            state_.insert_or_assign("port/" + boost::lexical_cast<std::string>(p.first), p.second->state());
+            state["port"][p.first] = p.second->state();
         }
+        state_ = std::move(state);
 
         const auto needs_sync = std::all_of(
             consumers_.begin(), consumers_.end(), [](auto& p) { return !p.second->has_synchronization_clock(); });
@@ -171,11 +174,11 @@ output::output(spl::shared_ptr<diagnostics::graph> graph, const video_format_des
 output::~output() {}
 void output::add(int index, const spl::shared_ptr<frame_consumer>& consumer) { impl_->add(index, consumer); }
 void output::add(const spl::shared_ptr<frame_consumer>& consumer) { impl_->add(consumer); }
-void output::remove(int index) { impl_->remove(index); }
-void output::remove(const spl::shared_ptr<frame_consumer>& consumer) { impl_->remove(consumer); }
+bool output::remove(int index) { return impl_->remove(index); }
+bool output::remove(const spl::shared_ptr<frame_consumer>& consumer) { return impl_->remove(consumer); }
 void output::operator()(const_frame frame, const video_format_desc& format_desc)
 {
     return (*impl_)(std::move(frame), format_desc);
 }
-const monitor::state& output::state() const { return impl_->state_; }
+core::monitor::state output::state() const { return impl_->state_; }
 }} // namespace caspar::core

@@ -50,6 +50,8 @@
 
 namespace caspar { namespace core {
 
+bool operator<(const route_id& a, const route_id& b) { return (a.mode + (a.index << 2)) < (b.mode + (b.index << 2)); }
+
 struct video_channel::impl final
 {
     monitor::state state_;
@@ -72,19 +74,19 @@ struct video_channel::impl final
 
     std::vector<int> audio_cadence_ = format_desc_.audio_cadence;
 
-    std::function<void(const monitor::state&)> tick_;
+    std::function<void(core::monitor::state)> tick_;
 
-    std::map<int, std::weak_ptr<core::route>> routes_;
-    std::mutex                                routes_mutex_;
+    std::map<route_id, std::weak_ptr<core::route>> routes_;
+    std::mutex                                     routes_mutex_;
 
     std::atomic<bool> abort_request_{false};
     std::thread       thread_;
 
   public:
-    impl(int                                        index,
-         const core::video_format_desc&             format_desc,
-         std::unique_ptr<image_mixer>               image_mixer,
-         std::function<void(const monitor::state&)> tick)
+    impl(int                                       index,
+         const core::video_format_desc&            format_desc,
+         std::unique_ptr<image_mixer>              image_mixer,
+         std::function<void(core::monitor::state)> tick)
         : index_(index)
         , format_desc_(format_desc)
         , output_(graph_, format_desc, index)
@@ -96,6 +98,7 @@ struct video_channel::impl final
         graph_->set_color("produce-time", caspar::diagnostics::color(0.0f, 1.0f, 0.0f));
         graph_->set_color("mix-time", caspar::diagnostics::color(1.0f, 0.0f, 0.9f, 0.8f));
         graph_->set_color("consume-time", caspar::diagnostics::color(1.0f, 0.4f, 0.0f, 0.8f));
+        graph_->set_color("frame-time", caspar::diagnostics::color(1.0f, 0.4f, 0.4f, 0.8f));
         graph_->set_color("osc-time", caspar::diagnostics::color(0.3f, 0.4f, 0.0f, 0.8f));
         graph_->set_text(print());
         caspar::diagnostics::register_graph(graph_);
@@ -103,6 +106,11 @@ struct video_channel::impl final
         CASPAR_LOG(info) << print() << " Successfully Initialized.";
 
         thread_ = std::thread([=] {
+#ifdef WIN32
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#endif
+            set_thread_name(L"channel-" + boost::lexical_cast<std::wstring>(index_));
+
             while (!abort_request_) {
                 try {
                     core::video_format_desc format_desc;
@@ -114,56 +122,82 @@ struct video_channel::impl final
                         nb_samples = audio_cadence_.front();
                     }
 
-                    monitor::state state;
+                    caspar::timer frame_timer;
+
+                    // Determine all layers that need a frame from the background producer
+                    std::vector<int> background_routes = {};
+                    {
+                        std::lock_guard<std::mutex> lock(routes_mutex_);
+
+                        for (auto& r : routes_) {
+                            // Ensure pointer is still valid
+                            if (!r.second.lock())
+                                continue;
+
+                            if (r.first.mode != route_mode::foreground) {
+                                background_routes.push_back(r.first.index);
+                            }
+                        }
+                    }
 
                     // Produce
                     caspar::timer produce_timer;
-                    auto          stage_frames = stage_(format_desc, nb_samples);
+                    auto          stage_frames = stage_(format_desc, nb_samples, background_routes);
                     graph_->set_value("produce-time", produce_timer.elapsed() * format_desc.fps * 0.5);
-
-                    state.insert_or_assign("stage", stage_.state());
 
                     // Mix
                     caspar::timer mix_timer;
-                    auto          mixed_frame = mixer_(stage_frames, format_desc, format_desc.audio_cadence[0]);
-                    graph_->set_value("mix-time", mix_timer.elapsed() * format_desc.fps * 0.5);
 
-                    state.insert_or_assign("mixer", mixer_.state());
+                    std::vector<core::draw_frame> frames;
+                    for (auto& p : stage_frames) {
+                        frames.push_back(p.second.foreground);
+                    }
+
+                    auto mixed_frame = mixer_(frames, format_desc, format_desc.audio_cadence[0]);
+                    graph_->set_value("mix-time", mix_timer.elapsed() * format_desc.fps * 0.5);
 
                     // Consume
                     caspar::timer consume_timer;
                     output_(std::move(mixed_frame), format_desc);
                     graph_->set_value("consume-time", consume_timer.elapsed() * format_desc.fps * 0.5);
 
-                    {
-                        std::vector<core::draw_frame> frames;
+                    graph_->set_value("frame-time", frame_timer.elapsed() * format_desc.fps * 0.5);
 
+                    {
                         std::lock_guard<std::mutex> lock(routes_mutex_);
 
-                        for (auto& p : stage_frames) {
-                            frames.push_back(p.second);
-
-                            auto it = routes_.find(p.first);
-                            if (it != routes_.end()) {
-                                auto route = it->second.lock();
-                                if (route) {
-                                    route->signal(draw_frame::pop(p.second));
-                                }
+                        for (auto& r : routes_) {
+                            auto route = r.second.lock();
+                            if (!route) {
+                                continue;
                             }
-                        }
 
-                        auto it = routes_.find(-1);
-                        if (it != routes_.end()) {
-                            auto route = it->second.lock();
-                            if (route) {
+                            if (r.first.index == -1) {
                                 route->signal(core::draw_frame(std::move(frames)));
+                                continue;
+                            }
+
+                            auto it = stage_frames.find(r.first.index);
+                            if (it == stage_frames.end()) {
+                                // Layer doesnt exist, so send empty frame to avoid freezing on last
+                                route->signal(draw_frame{});
+                            } else {
+                                if (r.first.mode == route_mode::background ||
+                                    (r.first.mode == route_mode::next && it->second.has_background)) {
+                                    route->signal(draw_frame::pop(it->second.background));
+                                } else {
+                                    route->signal(draw_frame::pop(it->second.foreground));
+                                }
                             }
                         }
                     }
 
-                    state.insert_or_assign("output", output_.state());
-
-                    state_ = std::move(state);
+                    monitor::state state = {};
+                    state["stage"]       = stage_.state();
+                    state["mixer"]       = mixer_.state();
+                    state["output"]      = output_.state();
+                    state["framerate"]   = {format_desc_.framerate.numerator(), format_desc_.framerate.denominator()};
+                    state_               = state;
 
                     caspar::timer osc_timer;
                     tick_(state_);
@@ -182,11 +216,15 @@ struct video_channel::impl final
         thread_.join();
     }
 
-    std::shared_ptr<core::route> route(int index = -1)
+    std::shared_ptr<core::route> route(int index = -1, route_mode mode = route_mode::foreground)
     {
         std::lock_guard<std::mutex> lock(routes_mutex_);
 
-        auto route = routes_[index].lock();
+        route_id id = {};
+        id.index    = index;
+        id.mode     = mode;
+
+        auto route = routes_[id].lock();
         if (!route) {
             route              = std::make_shared<core::route>();
             route->format_desc = format_desc_;
@@ -194,7 +232,12 @@ struct video_channel::impl final
             if (index != -1) {
                 route->name += L"/" + boost::lexical_cast<std::wstring>(index);
             }
-            routes_[index] = route;
+            if (mode == route_mode::background) {
+                route->name += L"/background";
+            } else if (mode == route_mode::next) {
+                route->name += L"/next";
+            }
+            routes_[id] = route;
         }
 
         return route;
@@ -222,10 +265,10 @@ struct video_channel::impl final
     int index() const { return index_; }
 };
 
-video_channel::video_channel(int                                        index,
-                             const core::video_format_desc&             format_desc,
-                             std::unique_ptr<image_mixer>               image_mixer,
-                             std::function<void(const monitor::state&)> tick)
+video_channel::video_channel(int                                       index,
+                             const core::video_format_desc&            format_desc,
+                             std::unique_ptr<image_mixer>              image_mixer,
+                             std::function<void(core::monitor::state)> tick)
     : impl_(new impl(index, format_desc, std::move(image_mixer), tick))
 {
 }
@@ -242,9 +285,9 @@ void                           core::video_channel::video_format_desc(const core
 {
     impl_->video_format_desc(format_desc);
 }
-int                   video_channel::index() const { return impl_->index(); }
-const monitor::state& video_channel::state() const { return impl_->state_; }
+int                  video_channel::index() const { return impl_->index(); }
+core::monitor::state video_channel::state() const { return impl_->state_; }
 
-std::shared_ptr<route> video_channel::route(int index) { return impl_->route(index); }
+std::shared_ptr<route> video_channel::route(int index, route_mode mode) { return impl_->route(index, mode); }
 
 }} // namespace caspar::core

@@ -27,6 +27,7 @@
 #include "../util/shader.h"
 #include "../util/texture.h"
 
+#include <common/assert.h>
 #include <common/env.h>
 #include <common/except.h>
 #include <common/gl/gl_check.h>
@@ -280,6 +281,7 @@ struct image_kernel::impl
         shader_->set("keyer", params.keyer);
 
         // Setup image-adjustements
+        shader_->set("invert", params.transform.invert);
 
         if (params.transform.levels.min_input > epsilon || params.transform.levels.max_input < 1.0 - epsilon ||
             params.transform.levels.min_output > epsilon || params.transform.levels.max_output < 1.0 - epsilon ||

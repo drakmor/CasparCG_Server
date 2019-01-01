@@ -126,20 +126,34 @@ auto run(const std::wstring& config_file_name, std::atomic<bool>& should_wait_fo
     std::thread([&]() mutable {
         std::wstring wcmd;
         while (true) {
+#ifdef WIN32
             if (!std::getline(std::wcin, wcmd)) { // TODO: It's blocking...
                 std::wcin.clear();
                 continue;
             }
-            if (boost::iequals(wcmd, L"EXIT") || boost::iequals(wcmd, L"Q") || boost::iequals(wcmd, L"QUIT") ||
-                boost::iequals(wcmd, L"BYE")) {
-                CASPAR_LOG(info) << L"Received message from Console: " << wcmd << L"\\r\\n";
-                should_wait_for_keypress = true;
-                shutdown(false); // false to not restart
-                break;
+#else
+            // Linux gets stuck in an endless loop if wcin gets a multibyte utf8 char
+            std::string cmd1;
+            if (!std::getline(std::cin, cmd1)) { // TODO: It's blocking...
+                std::cin.clear();
+                continue;
             }
+            wcmd = u16(cmd1);
+#endif
 
-            wcmd += L"\r\n";
-            amcp->parse(wcmd);
+            // If the cmd is empty, no point trying to parse it
+            if (wcmd != L"") {
+                if (boost::iequals(wcmd, L"EXIT") || boost::iequals(wcmd, L"Q") || boost::iequals(wcmd, L"QUIT") ||
+                    boost::iequals(wcmd, L"BYE")) {
+                    CASPAR_LOG(info) << L"Received message from Console: " << wcmd << L"\\r\\n";
+                    should_wait_for_keypress = true;
+                    shutdown(false); // false to not restart
+                    break;
+                }
+
+                wcmd += L"\r\n";
+                amcp->parse(wcmd);
+            }
         }
     })
         .detach();

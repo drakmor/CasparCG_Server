@@ -97,10 +97,6 @@ struct audio_mixer::impl : boost::noncopyable
         auto items    = std::move(items_);
         auto result   = std::vector<int32_t>(nb_samples * channels, 0);
 
-        if (items.empty()) {
-            return result;
-        }
-
         auto mixed = std::vector<double>(nb_samples * channels, 0.0f);
 
         for (auto& item : items) {
@@ -156,6 +152,6 @@ array<const int32_t> audio_mixer::operator()(const video_format_desc& format_des
 {
     return impl_->mix(format_desc, nb_samples);
 }
-const monitor::state& audio_mixer::state() const { return impl_->state_; }
+core::monitor::state audio_mixer::state() const { return impl_->state_; }
 
 }} // namespace caspar::core

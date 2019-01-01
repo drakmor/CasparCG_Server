@@ -119,11 +119,11 @@ class destroy_consumer_proxy : public frame_consumer
     {
         return consumer_->initialize(format_desc, channel_index);
     }
-    std::wstring          print() const override { return consumer_->print(); }
-    std::wstring          name() const override { return consumer_->name(); }
-    bool                  has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
-    int                   index() const override { return consumer_->index(); }
-    const monitor::state& state() const override { return consumer_->state(); }
+    std::wstring         print() const override { return consumer_->print(); }
+    std::wstring         name() const override { return consumer_->name(); }
+    bool                 has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
+    int                  index() const override { return consumer_->index(); }
+    core::monitor::state state() const override { return consumer_->state(); }
 };
 
 class print_consumer_proxy : public frame_consumer
@@ -150,11 +150,11 @@ class print_consumer_proxy : public frame_consumer
         consumer_->initialize(format_desc, channel_index);
         CASPAR_LOG(info) << consumer_->print() << L" Initialized.";
     }
-    std::wstring          print() const override { return consumer_->print(); }
-    std::wstring          name() const override { return consumer_->name(); }
-    bool                  has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
-    int                   index() const override { return consumer_->index(); }
-    const monitor::state& state() const override { return consumer_->state(); }
+    std::wstring         print() const override { return consumer_->print(); }
+    std::wstring         name() const override { return consumer_->name(); }
+    bool                 has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
+    int                  index() const override { return consumer_->index(); }
+    core::monitor::state state() const override { return consumer_->state(); }
 };
 
 spl::shared_ptr<core::frame_consumer>

@@ -40,12 +40,15 @@
 #include <common/timer.h>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <boost/regex.hpp>
 
 #include <tbb/atomic.h>
 #include <tbb/concurrent_queue.h>
+#include <tbb/parallel_for.h>
 
 #include <mutex>
 
@@ -112,7 +115,14 @@ class html_client
         diagnostics::register_graph(graph_);
 
         loaded_ = false;
-        executor_.begin_invoke([&] { update(); });
+        executor_.begin_invoke([&] {
+#ifdef WIN32
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+#endif
+            for (auto n = 0; n < 4; ++n) {
+                update();
+            }
+        });
     }
 
     void close()
@@ -199,13 +209,15 @@ class html_client
         pixel_desc.planes.push_back(core::pixel_format_desc::plane(width, height, 4));
 
         auto frame = frame_factory_->create_frame(this, pixel_desc);
-        std::memcpy(frame.image_data(0).begin(), buffer, width * height * 4);
+        auto src   = (char*)buffer;
+        auto dst   = (char*)frame.image_data(0).begin();
+        std::memcpy(dst, src, width * height * 4);
 
         {
             std::lock_guard<std::mutex> lock(frames_mutex_);
 
             frames_.push(core::draw_frame(std::move(frame)));
-            while (frames_.size() > 2) {
+            while (frames_.size() > 8) {
                 frames_.pop();
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             }
@@ -346,7 +358,12 @@ class html_client
             do_execute_javascript(javascript);
     }
 
-    std::wstring print() const { return L"html[" + url_ + L"]"; }
+    std::wstring print() const
+    {
+        return L"html[" + url_ + L"]" + L" " + boost::lexical_cast<std::wstring>(format_desc_.square_width) + L" " +
+               boost::lexical_cast<std::wstring>(format_desc_.square_height) + L" " +
+               boost::lexical_cast<std::wstring>(format_desc_.fps);
+    }
 
     IMPLEMENT_REFCOUNTING(html_client);
 };
@@ -406,6 +423,8 @@ class html_producer : public core::frame_producer
         return core::draw_frame::empty();
     }
 
+    core::draw_frame first_frame() override { return receive_impl(0); }
+
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override
     {
         if (!client_)
@@ -420,7 +439,7 @@ class html_producer : public core::frame_producer
 
     std::wstring print() const override { return L"html[" + url_ + L"]"; }
 
-    const core::monitor::state& state() const { return state_; }
+    core::monitor::state state() const override { return state_; }
 };
 
 spl::shared_ptr<core::frame_producer> create_cg_producer(const core::frame_producer_dependencies& dependencies,
@@ -438,8 +457,30 @@ spl::shared_ptr<core::frame_producer> create_cg_producer(const core::frame_produ
 
     const auto url = found_filename ? L"file://" + *found_filename : param_url;
 
-    return core::create_destroy_proxy(
-        spl::make_shared<html_producer>(dependencies.frame_factory, dependencies.format_desc, url));
+    boost::optional<int> width;
+    boost::optional<int> height;
+    {
+        auto u8_url = u8(url);
+
+        boost::smatch what;
+        if (boost::regex_search(u8_url, what, boost::regex("width=([0-9]+)"))) {
+            width = boost::lexical_cast<int>(what[1].str());
+        }
+
+        if (boost::regex_search(u8_url, what, boost::regex("height=([0-9]+)"))) {
+            height = boost::lexical_cast<int>(what[1].str());
+        }
+    }
+
+    auto format_desc = dependencies.format_desc;
+    if (width && height) {
+        format_desc.width         = *width;
+        format_desc.square_width  = *width;
+        format_desc.height        = *height;
+        format_desc.square_height = *height;
+    }
+
+    return core::create_destroy_proxy(spl::make_shared<html_producer>(dependencies.frame_factory, format_desc, url));
 }
 
 spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer_dependencies& dependencies,

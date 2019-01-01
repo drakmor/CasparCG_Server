@@ -47,10 +47,10 @@ class output final
 
     void add(const spl::shared_ptr<frame_consumer>& consumer);
     void add(int index, const spl::shared_ptr<frame_consumer>& consumer);
-    void remove(const spl::shared_ptr<frame_consumer>& consumer);
-    void remove(int index);
+    bool remove(const spl::shared_ptr<frame_consumer>& consumer);
+    bool remove(int index);
 
-    const monitor::state& state() const;
+    core::monitor::state state() const;
 
   private:
     struct impl;

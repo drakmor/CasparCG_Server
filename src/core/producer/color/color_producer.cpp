@@ -101,7 +101,6 @@ class color_producer : public frame_producer
     draw_frame receive_impl(int nb_samples) override
     {
         CASPAR_SCOPE_EXIT { state_["color"] = color_str_; };
-
         return frame_;
     }
 
@@ -109,11 +108,14 @@ class color_producer : public frame_producer
 
     std::wstring name() const override { return L"color"; }
 
-    const monitor::state& state() const override { return state_; }
+    core::monitor::state state() const override { return state_; }
 };
 
 std::wstring get_hex_color(const std::wstring& str)
 {
+    if (str.size() == 0)
+        return str;
+
     if (str.at(0) == '#')
         return str.length() == 7 ? L"#FF" + str.substr(1) : str;
 
@@ -186,8 +188,12 @@ spl::shared_ptr<frame_producer> create_color_producer(const spl::shared_ptr<fram
     std::vector<std::wstring> colors;
 
     for (auto& param : params) {
-        if (try_get_color(param, value))
+        if (try_get_color(param, value)) {
             colors.push_back(param);
+        } else {
+            // Stop after something not a colour, as that probably means the transition definition
+            break;
+        }
     }
 
     return spl::make_shared<color_producer>(frame_factory, colors);

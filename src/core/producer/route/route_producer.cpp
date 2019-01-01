@@ -40,7 +40,6 @@ namespace caspar { namespace core {
 
 class route_producer : public frame_producer
 {
-    monitor::state                      state_;
     spl::shared_ptr<diagnostics::graph> graph_;
 
     tbb::concurrent_bounded_queue<core::draw_frame> buffer_;
@@ -101,8 +100,6 @@ class route_producer : public frame_producer
     std::wstring print() const override { return L"route[" + route_->name + L"]"; }
 
     std::wstring name() const override { return L"route"; }
-
-    const monitor::state& state() const { return state_; }
 };
 
 spl::shared_ptr<core::frame_producer> create_route_producer(const core::frame_producer_dependencies& dependencies,
@@ -118,6 +115,14 @@ spl::shared_ptr<core::frame_producer> create_route_producer(const core::frame_pr
     auto channel = boost::lexical_cast<int>(what["CHANNEL"].str());
     auto layer   = what["LAYER"].matched ? boost::lexical_cast<int>(what["LAYER"].str()) : -1;
 
+    auto mode = core::route_mode::foreground;
+    if (layer >= 0) {
+        if (contains_param(L"BACKGROUND", params))
+            mode = core::route_mode::background;
+        else if (contains_param(L"NEXT", params))
+            mode = core::route_mode::next;
+    }
+
     auto channel_it = boost::find_if(dependencies.channels,
                                      [=](spl::shared_ptr<core::video_channel> ch) { return ch->index() == channel; });
 
@@ -128,7 +133,7 @@ spl::shared_ptr<core::frame_producer> create_route_producer(const core::frame_pr
 
     auto buffer = get_param(L"BUFFER", params, 0);
 
-    return spl::make_shared<route_producer>((*channel_it)->route(layer), buffer);
+    return spl::make_shared<route_producer>((*channel_it)->route(layer, mode), buffer);
 }
 
 }} // namespace caspar::core

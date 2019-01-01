@@ -87,6 +87,7 @@ const spl::shared_ptr<frame_producer>& frame_producer::empty()
             return make_ready_future(std::wstring(L""));
         }
         draw_frame last_frame() { return draw_frame{}; }
+        draw_frame first_frame() { return draw_frame{}; }
     };
 
     static spl::shared_ptr<frame_producer> producer = spl::make_shared<empty_frame_producer>();
@@ -165,7 +166,7 @@ class destroy_producer_proxy : public frame_producer
         });
     }
 
-    draw_frame                receive_impl(int nb_samples) override { return producer_->receive_impl(nb_samples); }
+    draw_frame                receive_impl(int nb_samples) override { return producer_->receive(nb_samples); }
     std::wstring              print() const override { return producer_->print(); }
     std::wstring              name() const override { return producer_->name(); }
     std::future<std::wstring> call(const std::vector<std::wstring>& params) override { return producer_->call(params); }
@@ -173,10 +174,11 @@ class destroy_producer_proxy : public frame_producer
     {
         return producer_->leading_producer(producer);
     }
-    uint32_t              frame_number() const override { return producer_->frame_number(); }
-    uint32_t              nb_frames() const override { return producer_->nb_frames(); }
-    draw_frame            last_frame() { return producer_->last_frame(); }
-    const monitor::state& state() const { return producer_->state(); }
+    uint32_t             frame_number() const override { return producer_->frame_number(); }
+    uint32_t             nb_frames() const override { return producer_->nb_frames(); }
+    draw_frame           last_frame() override { return producer_->last_frame(); }
+    draw_frame           first_frame() override { return producer_->first_frame(); }
+    core::monitor::state state() const override { return producer_->state(); }
 };
 
 spl::shared_ptr<core::frame_producer> create_destroy_proxy(spl::shared_ptr<core::frame_producer> producer)
